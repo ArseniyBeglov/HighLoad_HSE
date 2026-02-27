@@ -227,7 +227,6 @@
 | Seller API | `seller.resale.ru` | управление объявлениями (создание/редактирование/удаление) |
 | Media CDN | `img.resale.ru` | выдача изображений (CDN) |
 | Static CDN | `static.resale.ru` | статика (JS/CSS/шрифты) (CDN) |
-| Object storage origin | `s3.internal.resale.ru` | хранение медиа (origin для CDN, внутренний домен) |
 
 ### 3.2 Расположение ДЦ
 
