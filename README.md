@@ -225,7 +225,6 @@
 | Buyer API | `api.resale.ru` | покупательские действия (поиск/выдача, карточка, контакты, избранное, жалобы) |
 | Search | `search.resale.ru` | поиск/подсказки/фильтры |
 | Seller API | `seller.resale.ru` | управление объявлениями (создание/редактирование/удаление) |
-| Upload init | `upload.resale.ru` | инициация загрузки (получить upload URL, метаданные) |
 | Media CDN | `img.resale.ru` | выдача изображений (CDN) |
 | Static CDN | `static.resale.ru` | статика (JS/CSS/шрифты) (CDN) |
 | Object storage origin | `s3.internal.resale.ru` | хранение медиа (origin для CDN, внутренний домен) |
