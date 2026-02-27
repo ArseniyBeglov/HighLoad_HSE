@@ -275,13 +275,6 @@ DNS-схема:
 
 ![img.png](img.png)
 
-Практическая схема записей:
-- `api.resale.ru` → `A/AAAA` на публичный L7 VIP (MSK)
-- `search.resale.ru` → `A/AAAA` на публичный L7 VIP (MSK)
-- `seller.resale.ru` → `A/AAAA` на публичный L7 VIP (MSK)
-- `upload.resale.ru` → `A/AAAA` на публичный L7 VIP (MSK)
-- `img.resale.ru` → `CNAME` на CDN-провайдера
-- `static.resale.ru` → `CNAME` на CDN-провайдера
 
 Внутри MSK допускается несколько VIP/ingress-адресов для отказоустойчивости, а выдача IP может выполняться через Round-Robin DNS (как отдельный DNS-механизм балансировки). [[15]](./20260220_highload_l3_v20_hse.pdf)
 
