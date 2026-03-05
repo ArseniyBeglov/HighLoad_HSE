@@ -224,7 +224,6 @@
 | Web | `www.resale.ru` | сайт/SPA |
 | Buyer API | `api.resale.ru` | покупательские действия (поиск/выдача, карточка, контакты, избранное, жалобы) |
 | Seller API | `seller.resale.ru` | управление объявлениями (создание/редактирование/удаление) |
-| Admin/Moderation | `admin.resale.ru` | модерация/админка (очереди, решения, блокировки) |
 | Media CDN | `img.resale.ru` | выдача изображений (CDN) |
 | Static CDN | `static.resale.ru` | статика (JS/CSS/шрифты) (CDN) |
 
@@ -266,7 +265,7 @@
 DNS-схема:
 
 
-![img.png](img.png)
+![img_1.png](img_1.png)
 
 
 ## Источники
