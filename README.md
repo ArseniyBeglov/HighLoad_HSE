@@ -264,14 +264,14 @@
 DNS-схема:
 
 
-![img_1.png](img_1.png)
+![img_2.png](img_2.png)
 
 
 ## 4. Расчёт локальной балансировки нагрузки
 
 ### 4.1 Схема балансировки нагрузки
 
-![img.png](img.png)
+![img_3.png](img_3.png)
 
 ### 4.2 Расчёт количества балансировщиков
 
@@ -279,8 +279,8 @@ DNS-схема:
 
 | Уровень | Компонент | Кол-во | Ключевые параметры |
 |---|---|---:|---|
-| L4 | Cloud.ru Evolution Load Balancer | 3 | 3 VIP/IP:443 для `www`, `api`, `seller`; TLS завершается на L7 |
-| L7 | NGINX ingress/reverse-proxy | 12 | N=6 на группу, резервирование N*2; `BW_node≈8.80 Gbps`, `util=0.8`, `BW_eff=7.04 Гбит/с` |
+| L4 | Cloud.ru Evolution Load Balancer | 3 | 3 VIP/IP:443 для `www`, `api`, `seller` |
+| L7 | NGINX ingress/reverse-proxy | 12 | N=6 на группу, резервирование N*2; `BW_eff=7.04 Гбит/с` |
 
 
 Выбранный провайдер L4 балансировки: **Cloud.ru Evolution Load Balancer**. [[15]](https://cloud.ru/products/evolution-load-balancer)
@@ -289,33 +289,27 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 Для разделения входного трафика по доменам `www.resale.ru`, `api.resale.ru`, `seller.resale.ru` используются **3 независимые точки входа (VIP/публичных IP:443)** — по одной на каждый домен:
 
-| Домен | Кол-во L4 LB (VIP) |
-|---|---:|
-| `www.resale.ru` | 1 |
-| `api.resale.ru` | 1 |
-| `seller.resale.ru` | 1 |
-| **Итого L4** | **3** |
-
 
 #### L7 (NGINX ingress/reverse-proxy): функции и TLS
 
 На **L7** размещается NGINX (ingress/reverse-proxy), который выполняет:
 
-- **TLS termination** (сертификаты, handshake) и обработку HTTPS
+- **SSL termination** работу по HTTPS
 - **маршрутизацию** запросов к backend-сервисам
-- **таймауты/retry**, **rate-limit** и базовые политики отказоустойчивости на HTTP-уровне. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
+- **таймауты**, **rate-limit** и базовые политики отказоустойчивости на HTTP-уровне. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
-#### L7: расчёт по сети (главный ограничитель)
+#### L7: расчёт по сети количесва узлов
+Так как используется только один датацентр, то при отказе нескольких узлов L7 должна быть обеспеча стабильная работа, поэтому была выбрана схема резервирования: **N*2**, которая позволит выдержать трафик даже при потере половины узлов.
 
 Пиковый внешний трафик по расчёту нагрузки (раздел 2.2.3):
 
 `BW_peak_total = 41.13 Гбит/с`
 
-Опорная пропускная способность 1 L7-ноды по бенчмарку NGINX Ingress:
+Опорная пропускная способность одной L7-ноды по бенчмарку NGINX Ingress:
 
 `BW_node ≈ 8.80 Gbps` [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
-В расчёте используем целевую максимально допустимую загрузку ноды:
+Используем целевую максимально допустимую загрузку ноды:
 
 `util = 0.8`
 
@@ -327,8 +321,6 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 `N = BW_peak_total / BW_eff = 41.13 / 7.04  = 5.84 = 6`
 
-Используемая схема резервирования: **N*2**
-
 Итого количество L7 узлов:
 
 `L7_total = 2 * 6 = 12`
@@ -336,7 +328,7 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 #### L7: проверка ограничения по SSL/TLS termination
 
-Пиковый суммарный `RPS_peak` из раздела 2.2.2 составляет около **10.7k rps**.
+Пиковый суммарный `RPS_peak` из раздела 2.2.2 составляет около **10.7 тыс. rps**.
 
 По бенчмарку NGINX Ingress показатель **SSL TPS** на одной ноде достигает значений порядка **~55–58k** , что существенно выше пиковой нагрузки по RPS, рассчитанные ранее. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 SSL/TLS termination не лимитирует, количество L7 определяется пропускной способностью сети.
