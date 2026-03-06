@@ -294,7 +294,7 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 - **SSL termination** работу по HTTPS
 - **маршрутизацию** запросов к backend-сервисам
-- **таймауты**, **rate-limit** и базовые политики отказоустойчивости на HTTP-уровне. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
+- **таймауты**, **rate-limit** на HTTP-уровне. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
 #### 4.2.2 L7: расчёт количества узлов по данным трафика
 Так как используется только один датацентр, то при отказе нескольких узлов L7 должна быть обеспеча стабильная работа, поэтому была выбрана схема резервирования: **N*2**, которая позволит выдержать трафик даже при потере половины узлов.
