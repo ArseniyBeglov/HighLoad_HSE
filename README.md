@@ -308,7 +308,7 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 `BW_node ≈ 8.80 Gbps` [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
-Используем целевую максимально допустимую загрузку ноды [[17]]https://www.npiontko.pro/2024/12/27/capacity-planning-utilization:
+Используем максимально допустимую загрузку ноды [[17]](https://www.npiontko.pro/2024/12/27/capacity-planning-utilization):
 
 `util = 0.8`
 
