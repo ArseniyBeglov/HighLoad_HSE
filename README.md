@@ -328,7 +328,7 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 
 Пиковый суммарный `RPS_peak` из раздела 2.2.2 составляет около **10.7 тыс. rps**.
 
-По бенчмарку NGINX Ingress показатель **SSL TPS** на одной ноде достигает значений порядка **~55–58k** , что существенно выше пиковой нагрузки по RPS, рассчитанные ранее. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
+По бенчмарку NGINX Ingress показатель **SSL TPS** на одной ноде достигает значений порядка до 58 тыс. запросов , что выше пиковой нагрузки по RPS, рассчитанной ранее. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 Поэтому SSL/TLS termination не является ограничителем, поэтому количество L7 определяется пропускной способностью сети.
 
 
