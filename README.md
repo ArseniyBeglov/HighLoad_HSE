@@ -269,68 +269,135 @@ DNS-схема:
 
 ### 4.1 Схема балансировки нагрузки
 
-![img_1.png](img_1.png)
+![img_2.png](img_2.png)
 
-### 4.2 Расчёт количества балансировщиков
+На уровне **L4** используется **Cloud.ru Evolution Load Balancer**. Балансировщик работает на уровне **L4** и не выполняет **SSL/TLS termination**, поэтому завершение TLS выносится на уровень **L7**. [[15]](https://cloud.ru/products/evolution-load-balancer)
 
-### Сводная таблица результатов
+На уровне **L7** используется **NGINX ingress/reverse-proxy**, который выполняет:
 
-| Уровень | Компонент | Кол-во | Ключевые параметры |
-|---|---|---:|---|
-| L4 | Cloud.ru Evolution Load Balancer | 3 | 3 VIP/IP:443 для `www`, `api`, `seller` |
-| L7 | NGINX ingress/reverse-proxy | 12 | N=6 на группу, резервирование N*2; `BW_eff=7.04 Гбит/с` |
+- **SSL termination**;
+- **HTTP/HTTPS-маршрутизацию** запросов;
+- распределение трафика по backend-сервисам. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
+Резервирование L7-групп принимается по схеме **N+1**:
 
-Выбранный провайдер L4 балансировки: **Cloud.ru Evolution Load Balancer**. [[15]](https://cloud.ru/products/evolution-load-balancer)
+`N_total = N_work + 1`
 
-Cloud.ru Evolution Load Balancer работает на **L4** и не выполняет **SSL/TLS termination** (соединение TLS завершается на L7). [[15]](https://cloud.ru/products/evolution-load-balancer)
+---
 
-Для разделения входного трафика по доменам `www.resale.ru`, `api.resale.ru`, `seller.resale.ru` используются 3 независимые точки входа (VIP/публичных IP:443) по одной на каждый домен
+## 4.2 Расчёт количества балансировщиков
 
+### Сводная таблица расчёта L7
 
-#### 4.2.1 L7 (NGINX ingress/reverse-proxy): функции и TLS
+| Группа | Домен | Ограничение | Нод | CPU на ноду | Итого CPU |
+|---|---|---|---:|---:|---:|
+| Web | `www.resale.ru` | HTTPS CPS | 2 | 8 | 16 |
+| Buyer API | `api.resale.ru` | сеть | 5 | 4 | 20 |
+| Seller API | `seller.resale.ru` | сеть | 4 | 4 | 16 |
+| **Итого** | — | — | **11** | — | **52** |
 
-На **L7** размещается NGINX (ingress/reverse-proxy), который выполняет:
+Для расчёта принимаются:
 
-- **SSL termination** работу по HTTPS
-- **маршрутизацию** запросов к backend-сервисам
-- **таймауты**, **rate-limit** и базовые политики отказоустойчивости на HTTP-уровне. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
+- `util = 0,8` — ограничение по загрузке ноды [[17]](https://www.npiontko.pro/2024/12/27/capacity-planning-utilization)
+- `k_conn = 0,2` — коэффициент новых HTTPS-соединений, то есть  
+  `CPS_peak = 0,2 * RPS_peak` [[19]](https://blog.cloudflare.com/measuring-network-connections-at-scale/)
 
-#### 4.2.2 L7: расчёт количества узлов по данным трафика
-Так как используется только один датацентр, то при отказе нескольких узлов L7 должна быть обеспеча стабильная работа, поэтому была выбрана схема резервирования: **N*2**, которая позволит выдержать трафик даже при потере половины узлов.
+По бенчмарку **NGINX Ingress Controller**:
 
-Пиковый внешний трафик по расчёту нагрузки (раздел 2.2.3):
+- для профиля **4 CPU**  
+  `BW_eff = 8,72 * 0,8 = 6,98 Гбит/с` [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
 
-`BW_peak_total = 41.13 Гбит/с`
+- для профиля **8 CPU**  
+  `BW_eff = 8,64 * 0,8 = 6,91 Гбит/с`  
+  `CPS_eff = 3 399 * 0,8 = 2 719 conn/s`  
+  [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes) [[18]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
 
-Опорная пропускная способность одной L7-ноды по бенчмарку NGINX Ingress:
+- для профиля **4 CPU** по HTTPS CPS  
+  `CPS_eff = 1 735 * 0,8 = 1 388 conn/s` [[18]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
 
-`BW_node ≈ 8.80 Gbps` [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
+Профиль L7-ноды выбирается как минимальный по CPU, при котором сохраняется минимальное количество нод.
 
-Используем максимально допустимую загрузку ноды [[17]](https://www.npiontko.pro/2024/12/27/capacity-planning-utilization):
+---
 
-`util = 0.8`
+## 4.2.1 Группа `api.resale.ru`
 
-Эффективная пропускная способность одной L7-ноды:
+Для `api.resale.ru`:
 
-`BW_eff = BW_node * util = 8.80 * 0.8 = 7.04 Гбит/с`
+- `RPS_peak = 10 136,36`
+- `CPS_peak = 0,2 * 10 136,36 = 2 027,27`
+- `BW_peak = 24,81 Гбит/с`
 
-Количество L7 узлов на одну группу:
+Количество нод по сети:
 
-`N = BW_peak_total / BW_eff = 41.13 / 7.04  = 5.84 = 6`
+`24,81 / 6,98 = 3,56 => 4 ноды`
 
-Итого количество L7 узлов:
+Количество нод по новым HTTPS-соединениям:
 
-`L7_total = 2 * 6 = 12`
+`2 027,27 / 1 388 = 1,46 => 2 ноды`
 
+Принимается:
 
-#### 4.2.3 L7: проверка ограничения по SSL/TLS termination
+- `N_work = max(4, 2) = 4`
+- `N_total = 4 + 1 = 5`
 
-Пиковый суммарный `RPS_peak` из раздела 2.2.2 составляет около **10.7 тыс. rps**.
+Выбранный профиль:
 
-По бенчмарку NGINX Ingress показатель **SSL TPS** на одной ноде достигает значений порядка **~55–58k** , что существенно выше пиковой нагрузки по RPS, рассчитанные ранее. [[16]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes)
-Поэтому SSL/TLS termination не является ограничителем, поэтому количество L7 определяется пропускной способностью сети.
+- **5 нод по 4 CPU**
+- `CPU_total = 5 * 4 = 20`
 
+---
+
+## 4.2.2 Группа `seller.resale.ru`
+
+Для `seller.resale.ru`:
+
+- `RPS_peak = 555,55`
+- `CPS_peak = 0,2 * 555,55 = 111,11`
+- `BW_peak = 16,32 Гбит/с`
+
+Количество нод по сети:
+
+`16,32 / 6,98 = 2,34 => 3 ноды`
+
+Количество нод по новым HTTPS-соединениям:
+
+`111,11 / 1 388 = 0,08 => 1 нода`
+
+Принимается:
+
+- `N_work = max(3, 1) = 3`
+- `N_total = 3 + 1 = 4`
+
+Выбранный профиль:
+
+- **4 ноды по 4 CPU**
+- `CPU_total = 4 * 4 = 16`
+
+---
+
+## 4.2.3 Группа `www.resale.ru`
+
+Для `www.resale.ru` берётся пиковый `RPS` всей системы из раздела 2:
+
+`RPS_peak,total = 10 691,91`
+
+Пиковая нагрузка по новым HTTPS-соединениям:
+
+`CPS_peak,www = 0,2 * 10 691,91 = 2 138,38`
+
+Количество нод по новым HTTPS-соединениям для профиля **8 CPU**:
+
+`2 138,38 / 2 719 = 0,79 => 1 нода`
+
+Принимается:
+
+- `N_work = 1`
+- `N_total = 1 + 1 = 2`
+
+Выбранный профиль:
+
+- **2 ноды по 8 CPU**
+- `CPU_total = 2 * 8 = 16`
 
 ## Источники
 1. https://ads.avito.com/platform
@@ -350,3 +417,5 @@ Cloud.ru Evolution Load Balancer работает на **L4** и не выпол
 15. https://cloud.ru/products/evolution-load-balancer
 16. https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes
 17. https://www.npiontko.pro/2024/12/27/capacity-planning-utilization
+18. https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers
+19. https://blog.cloudflare.com/measuring-network-connections-at-scale/
