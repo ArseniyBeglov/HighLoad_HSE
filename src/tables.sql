@@ -149,33 +149,3 @@ CREATE TABLE card_search (
                              CONSTRAINT fk_card_search_location
                                  FOREIGN KEY (location_id) REFERENCES locations(id)
 );
-
-CREATE TABLE search_result_cache (
-                                     cache_key VARCHAR(256) PRIMARY KEY,
-                                     user_id BIGINT,
-                                     category_id BIGINT,
-                                     location_id BIGINT,
-                                     query_text VARCHAR(512) NOT NULL,
-                                     filters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                                     result_card_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-                                     ttl_expires_at TIMESTAMP NOT NULL,
-                                     created_at TIMESTAMP NOT NULL,
-                                     CONSTRAINT fk_search_result_cache_user
-                                         FOREIGN KEY (user_id) REFERENCES users(id),
-                                     CONSTRAINT fk_search_result_cache_category
-                                         FOREIGN KEY (category_id) REFERENCES categories(id),
-                                     CONSTRAINT fk_search_result_cache_location
-                                         FOREIGN KEY (location_id) REFERENCES locations(id)
-);
-
-CREATE TABLE card_cache (
-                            cache_key VARCHAR(256) PRIMARY KEY,
-                            card_id BIGINT NOT NULL,
-                            payload_json JSONB NOT NULL,
-                            ttl_expires_at TIMESTAMP NOT NULL,
-                            created_at TIMESTAMP NOT NULL,
-                            CONSTRAINT fk_card_cache_card
-                                FOREIGN KEY (card_id) REFERENCES cards(id)
-);
-
-
