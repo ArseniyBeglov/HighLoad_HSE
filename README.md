@@ -486,16 +486,6 @@ DNS-схема:
 
 ![buffers.png](buffers.png)
 
-Привязка к физическим хранилищам следующая:
-
-- `users`, `categories`, `locations`, `complaints` — PostgreSQL;
-- `cards` — PostgreSQL, отдельный шардируемый контур;
-- `storage` — PostgreSQL для метаданных + Object Storage для бинарных файлов;
-- `favorites` — PostgreSQL, отдельный шардируемый контур;
-- `event_log` — ClickHouse;
-- `card_search` — OpenSearch;
-- кеши — Redis;
-- буферы — Kafka.
 
 ### 6.2 Сводная таблица физической схемы
 
