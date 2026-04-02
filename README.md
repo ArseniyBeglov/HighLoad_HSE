@@ -486,6 +486,19 @@ DNS-схема:
 
 ![buffers.png](buffers.png)
 
+В качестве S3-хранилища для файлов выбирается **MinIO** как self-hosted S3-compatible Object Storage.  
+Решение подходит под один датацентр в Москве, разворачивается в Kubernetes, поддерживает S3 API, versioning и erasure coding [[20]](https://www.min.io/) [[21]](https://docs.min.io/enterprise/aistor-object-store/administration/objects-and-versioning/versioning/) [[22]](https://docs.min.io/enterprise/aistor-object-store/operations/core-concepts/erasure-coding/).
+
+Привязка к физическим хранилищам следующая:
+
+- `users`, `categories`, `locations`, `complaints` — PostgreSQL;
+- `cards` — PostgreSQL, отдельный шардируемый контур;
+- `storage` — PostgreSQL для метаданных + MinIO для бинарных файлов;
+- `favorites` — PostgreSQL, отдельный шардируемый контур;
+- `event_log` — ClickHouse;
+- `card_search` — OpenSearch;
+- кеши — Redis;
+- буферы — Kafka.
 
 ### 6.2 Сводная таблица физической схемы
 
@@ -494,17 +507,21 @@ DNS-схема:
 | `users` | основная таблица | строковое OLTP-хранение | PostgreSQL | нет | Профиль пользователя и публичные данные продавца. Нужны strong consistency, уникальные идентификаторы и транзакционное обновление. |
 | `categories` | справочник | строковое OLTP-хранение | PostgreSQL | нет | Иерархия категорий. Таблица маленькая, изменения редкие, основная нагрузка снимается кешем. |
 | `locations` | справочник | строковое OLTP-хранение | PostgreSQL | нет | Иерархия географии. Таблица маленькая, изменения редкие, горячие чтения снимаются кешем. |
-| `cards` | основная таблица | строковое OLTP-хранение | PostgreSQL | по `card_id` | Source of truth для объявления. Здесь остаются CRUD, owner read-after-write и транзакционная часть продукта. |
+| `cards` | основная таблица | строковое OLTP-хранение | PostgreSQL | по `seller_id` | Source of truth для объявления. Шардирование изменено с `card_id` на `seller_id`, чтобы все объявления одного продавца находились в одном shard. Это упрощает seller-path и уменьшает число cross-shard запросов. |
 | `storage` | таблица метаданных файлов | строковое OLTP-хранение для метаданных | PostgreSQL | по `owner_user_id` | В PostgreSQL хранятся только метаданные файла: ключ, URL, MIME, размеры, связи с пользователем и объявлением. |
-| `media objects` | файловые данные | объектное хранение | S3-compatible Object Storage | нет | Оригиналы фото и thumbnails. Бинарные файлы вынесены из PostgreSQL из-за очень большого объёма хранения. |
+| `media objects` | файловые данные | объектное хранение | MinIO | нет | Оригиналы фото и thumbnails. Бинарные файлы вынесены из PostgreSQL из-за очень большого объёма хранения. |
 | `favorites` | связь many-to-many | строковое OLTP-хранение | PostgreSQL | по `user_id` | Source of truth для избранного. Все операции пользователя по избранному локализуются в одном shard. |
 | `complaints` | модерационная таблица | строковое OLTP-хранение | PostgreSQL | нет | Жалобы и состояние модерации. Объём и RPS низкие, важнее простота и strong consistency. |
-| `event_log` | событийный журнал | колоночное append-only хранение | ClickHouse | по времени и shard кластера | Журнал действий пользователей. Вынесен в отдельное аналитическое хранилище из-за большого числа строк и записи. |
+| `event_log` | событийный журнал | колоночное append-only хранение | ClickHouse | по `user_id`, с партиционированием по времени | Журнал действий пользователей. Вынесен в отдельное аналитическое хранилище из-за большого числа строк и записи. |
 | `card_search` | поисковая проекция | document store + inverted index | OpenSearch | по `card_id` | Отдельная поисковая проекция для полнотекстового поиска, фильтров и сортировок. |
 | `caches` | кеширующий слой | key-value | Redis | по ключу Redis Cluster | Кеши `categories cache`, `locations cache`, `cards cache`, `seller cache`, `favorites cache`. Снижают число чтений из PostgreSQL и OpenSearch. |
 | `buffers` | буферный слой | log / topic | Kafka | по ключу сообщения | Буферы `cards-upsert`, `cards-delete`, `user-actions`, `moderation-events`, `media-events`. Развязывают OLTP, поиск, аналитику и обработку медиа. |
 
-### 6.3 Индексы
+### 6.3 Индексы и схема данных в OpenSearch
+
+Для `card_search` используется **explicit mapping** в OpenSearch.  
+`mapping` определяет типы полей и правила индексации документа; полнотекстовый поиск использует inverted index, а сортировки и агрегации — `doc_values` [[23]](https://docs.opensearch.org/latest/mappings/) [[24]](https://docs.opensearch.org/latest/mappings/mapping-parameters/doc-values/).
+#### 6.3.1 Индексы
 
 | Сущность | Индекс / структура | Тип индекса | Unique | Описание |
 |---|---|---|---|---|
@@ -534,11 +551,27 @@ DNS-схема:
 | `event_log` | `ORDER BY (created_at, user_id, action_type, card_id)` | sort key | нет | Базовый порядок хранения для аналитических чтений. |
 | `card_search` | `doc_id = card_id` | document id | да | Точечное обновление документа поисковой проекции. |
 | `card_search` | индекс по `title` | inverted index | нет | Полнотекстовый поиск по заголовку. |
-| `card_search` | индексы по `category_id`, `location_id`, `status`, `price_minor`, `updated_at` | inverted / doc values | нет | Фильтры, сортировки и агрегации. |
-| `card_search` | индексы по полям из `attributes_json` | inverted / doc values | нет | Фильтрация по атрибутам объявления. |
+| `card_search` | индексы по `seller_id`, `category_id`, `location_id`, `status`, `price_minor`, `published_at` | inverted index + doc_values | нет | Фильтры, сортировки и агрегации. |
+| `card_search` | индексы по `attr_*` полям | inverted index + doc_values | нет | Фильтрация по атрибутам объявления. |
 
-Полнотекстовый поиск и тяжёлые фильтры по атрибутам не обслуживаются индексами в `cards`.  
-Этот путь полностью вынесен в `card_search`.
+
+#### 6.3.2 Схема документа `card_search_v1` в OpenSearch
+
+Для поиска используется схема документа:
+
+| Поле в OpenSearch | Тип | Назначение |
+|---|---|---|
+| `card_id` | `long` | идентификатор объявления, `doc_id` документа |
+| `seller_id` | `long` | фильтр, группировка продавца, маршрут к shard `cards` |
+| `category_id` | `long` | фильтр по категории |
+| `location_id` | `long` | фильтр по географии |
+| `title` | `text` + `keyword` | полнотекстовый поиск и точное сравнение |
+| `price_minor` | `long` | диапазон цены и сортировка |
+| `status` | `keyword` | фильтр по статусу |
+| `published_at` | `date` | сортировка по свежести |
+| `attr_*` | `keyword` / `long` / `boolean` | индексируемые атрибуты категории, реально используемые в фильтрах |
+| `attributes_raw` | `flat_object` | полная копия атрибутов без раздувания mapping и без отдельной индексации каждого под-поля [[25]](https://docs.opensearch.org/latest/mappings/supported-field-types/flat-object/) |
+| `ranking_features_json` | `object`, `index=false` | сигналы ранжирования, используемые после выборки документов |
 
 ### 6.4 Денормализация
 
@@ -550,6 +583,7 @@ DNS-схема:
 | `users` | `rating`, `reviews_count`, `is_verified` | Признаки доверия к продавцу хранятся в `users` и не вычисляются на лету из событий. |
 | `storage` | `thumbnail_url`, `thumbnail_size_bytes` | Метаданные thumbnail хранятся рядом с оригиналом, чтобы не искать их отдельно. |
 | `card_search` | полная поисковая проекция объявления | Поисковая сущность собирает в одном документе данные для поиска, фильтрации и сортировки и уводит search-path из OLTP. |
+| `card_search` | `attr_*` поля | Из `attributes_json` выделяются только реально используемые фильтры; полная копия атрибутов сохраняется отдельно в `attributes_raw`. |
 | `card_search` | `ranking_features_json` | Предрассчитанные сигналы ранжирования хранятся внутри поискового документа и не собираются синхронно при каждом запросе. |
 
 Новые таблицы для денормализации не вводятся.  
@@ -557,44 +591,72 @@ DNS-схема:
 
 ### 6.5 Кеши и буферы
 
+По документации Redis целевой cache hit ratio зависит от нагрузки, но в общем случае должен быть выше `50%` [[27]](https://redis.io/docs/latest/operate/rs/monitoring/observability/).  
+Для reference-кешей и горячих read-path принимаются следующие размеры и целевые hit ratio.
+
 #### 6.5.1 Кеши
 
-| Кеш | Технология | Где используется | Политика | Описание |
-|---|---|---|---|---|
-| `categories cache` | Redis | buyer-path, seller-path | TTL `1 час`, сброс по изменению справочника | Убирает постоянные чтения дерева категорий из PostgreSQL. |
-| `locations cache` | Redis | buyer-path, seller-path | TTL `1 час`, сброс по изменению справочника | Убирает постоянные чтения дерева локаций из PostgreSQL. |
-| `cards cache` | Redis | card view | TTL `5 минут`, delete on update | Кеширует уже собранный ответ карточки для горячих объявлений. |
-| `seller cache` | Redis | card view, contact request | TTL `5 минут`, delete on update | Кеширует публичный профиль продавца. |
-| `favorites cache` | Redis | add/remove favorite, card view | TTL `5 минут`, синхронное обновление при write | Хранит горячие данные по избранному и снижает число чтений из PostgreSQL. |
+Суммарный лимит памяти Redis Cluster принимается **16 ГБ**.
+
+| Кеш | Размер | Целевой cache hit ratio | Где используется | Политика | Описание |
+|---|---:|---:|---|---|---|
+| `categories cache` | 64 МБ | 99% | buyer-path, seller-path | TTL `1 час`, сброс по изменению справочника | Кеш дерева категорий. Справочник малый и почти всегда должен читаться из Redis. |
+| `locations cache` | 256 МБ | 99% | buyer-path, seller-path | TTL `1 час`, сброс по изменению справочника | Кеш дерева локаций и горячих географических узлов. |
+| `cards cache` | 8 ГБ | 80% | card view | TTL `5 минут`, delete on update | Кеширует собранный ответ карточки для горячих объявлений. Основной read-кеш buyer-path. |
+| `seller cache` | 1 ГБ | 90% | card view, contact request | TTL `5 минут`, delete on update | Кеширует публичный профиль продавца. |
+| `favorites cache` | 2 ГБ | 85% | add/remove favorite, card view | TTL `5 минут`, синхронное обновление при write | Хранит горячие данные по избранному и снижает число чтений из PostgreSQL. |
 
 #### 6.5.2 Буферы
 
-| Буфер | Технология | Продюсер | Потребитель | Описание |
-|---|---|---|---|---|
-| `cards-upsert` | Kafka | Seller API, moderation service | search indexer | Асинхронное обновление `card_search` после изменения объявления. |
-| `cards-delete` | Kafka | Seller API, moderation service | search indexer | Удаление или скрытие объявления из поисковой проекции. |
-| `user-actions` | Kafka | Buyer API, Seller API | ClickHouse ingestor, anti-fraud, ranking pipeline | Вывод пользовательских действий из OLTP в аналитический контур. |
-| `moderation-events` | Kafka | moderation service | cache invalidator, search indexer | Синхронизация кешей и поисковой проекции после модерации. |
-| `media-events` | Kafka | media service | thumbnail worker, metadata updater | Асинхронная обработка изображений и обновление метаданных. |
+| Буфер | Технология | Разделы | Продюсер | Потребитель | Описание |
+|---|---|---:|---|---|---|
+| `cards-upsert` | Kafka | 4 | Seller API, moderation service | search indexer | Асинхронное обновление `card_search` после изменения объявления. |
+| `cards-delete` | Kafka | 4 | Seller API, moderation service | search indexer | Удаление или скрытие объявления из поисковой проекции. |
+| `user-actions` | Kafka | 12 | Buyer API, Seller API | ClickHouse ingestor, anti-fraud, ranking pipeline | Вывод пользовательских действий из OLTP в аналитический контур. |
+| `moderation-events` | Kafka | 4 | moderation service | cache invalidator, search indexer | Синхронизация кешей и поисковой проекции после модерации. |
+| `media-events` | Kafka | 8 | media service | thumbnail worker, metadata updater | Асинхронная обработка изображений и обновление метаданных. |
 
 ### 6.6 Шардирование и резервирование СУБД
 
+OpenSearch рекомендует держать размер shard в диапазоне **10–50 ГБ**; для search-нагрузки с приоритетом низкой задержки стартовый ориентир — **10–30 ГБ** [[26]](https://docs.opensearch.org/latest/getting-started/intro/).  
+На основе рассчитанных в разделах 2 и 5 объёмов и RPS принимаются следующие количества shard:
+
+- `cards`: `4 shard`  
+  `220 000 000 / 4 = 55 000 000` объявлений на shard;  
+  `0,41 ТБ / 4 = 0,1025 ТБ` данных на shard без учёта реплики;
+
+- `storage`: `8 shard`  
+  `1 540 000 000 / 8 = 192 500 000` строк metadata на shard;
+
+- `favorites`: `4 shard`  
+  `720 000 000 / 4 = 180 000 000` строк на shard;
+
+- `event_log`: `2 shard`  
+  `1,08 ТБ / 2 = 0,54 ТБ` сырых данных на shard за окно хранения `30 дней`;
+
+- `card_search`: `8 primary shard`  
+  `0,20 ТБ / 8 ≈ 25 ГБ` на primary shard, что попадает в рекомендуемый диапазон OpenSearch для поисковой нагрузки [[26]](https://docs.opensearch.org/latest/getting-started/intro/).
+
 Шардирование используется не для всех таблиц, а только для сущностей с большим объёмом или высоким RPS.
 
-| Сущность / контур | Тип распределения | Ключ / правило | Как работает | Резервирование |
-|---|---|---|---|---|
-| `users` | без шардирования | — | чтение и запись идут в единый PostgreSQL-контур | один основной узел и две реплики для чтения |
-| `categories` | без шардирования | — | справочник хранится целиком в одном PostgreSQL-контуре | один основной узел и две реплики для чтения |
-| `locations` | без шардирования | — | справочник хранится целиком в одном PostgreSQL-контуре | один основной узел и две реплики для чтения |
-| `cards` | горизонтальное шардирование | `hash(card_id)` | сервис по `card_id` выбирает нужный shard; запись идёт в основной узел shard, чтение — в основной узел или реплику | для каждого shard: один основной узел и одна реплика |
-| `storage` | горизонтальное шардирование | `hash(owner_user_id)` | метаданные файлов пользователя попадают в один shard; это упрощает media-path | для каждого shard: один основной узел и одна реплика |
-| `media objects` | без шардирования на уровне приложения | — | приложению доступен единый bucket; распределение делает само объектное хранилище | копии файлов или erasure coding на стороне хранилища |
-| `favorites` | горизонтальное шардирование | `hash(user_id)` | все операции пользователя по избранному идут в один shard | для каждого shard: один основной узел и одна реплика |
-| `complaints` | без шардирования | — | модерация работает с единой таблицей | один основной узел и одна реплика |
-| `event_log` | shard + partitioning | shard кластера + время | ingestion пишет события в ClickHouse; внутри shard данные режутся по времени | два shard, у каждого по две копии данных |
-| `card_search` | индексное шардирование | `card_id` | OpenSearch сам распределяет документы по shard индекса | восемь основных shard и по одной копии для каждого |
-| `caches` | cluster sharding | ключ Redis | Redis Cluster сам распределяет ключи по слотам | для каждого shard кеша есть основная и резервная копия |
-| `buffers` | partitioning | ключ сообщения: `card_id` или `user_id` | Kafka распределяет сообщения по разделам; порядок сохраняется внутри ключа | каждая запись хранится на трёх брокерах |
+| Сущность / контур | Количество shard / узлов | Ключ / правило | Как работает | Резервирование |
+|---|---:|---|---|---|
+| `users` | 1 | — | чтение и запись идут в единый PostgreSQL-контур | один основной узел и две реплики для чтения |
+| `categories` | 1 | — | справочник хранится целиком в одном PostgreSQL-контуре | один основной узел и две реплики для чтения |
+| `locations` | 1 | — | справочник хранится целиком в одном PostgreSQL-контуре | один основной узел и две реплики для чтения |
+| `cards` | 4 | `shard_id = hash(seller_id) % 4` | все объявления одного продавца попадают в один shard; это упрощает seller CRUD и список объявлений продавца | для каждого shard: один основной узел и одна реплика |
+| `storage` | 8 | `shard_id = hash(owner_user_id) % 8` | метаданные файлов пользователя попадают в один shard; это упрощает media-path | для каждого shard: один основной узел и одна реплика |
+| `media objects` | 1 логический bucket | — | приложению доступен единый bucket `resale-media`; физическое распределение выполняет MinIO | erasure coding + versioning в самом MinIO [[21]](https://docs.min.io/enterprise/aistor-object-store/administration/objects-and-versioning/versioning/) [[22]](https://docs.min.io/enterprise/aistor-object-store/operations/core-concepts/erasure-coding/) |
+| `favorites` | 4 | `shard_id = hash(user_id) % 4` | все операции пользователя по избранному идут в один shard | для каждого shard: один основной узел и одна реплика |
+| `complaints` | 1 | — | модерация работает с единой таблицей | один основной узел и одна реплика |
+| `event_log` | 2 | `hash(user_id)`, партиционирование по дню | события равномерно распределяются между shard, внутри shard данные режутся по времени | два shard, у каждого по две копии данных |
+| `card_search` | 8 primary shard | `card_id` | OpenSearch сам распределяет документы по shard индекса; поисковый запрос исполняется по всем shard | у каждого primary shard одна копия |
+| `caches` | 3 master shard | ключ Redis | Redis Cluster сам распределяет ключи по слотам | у каждого master shard одна реплика |
+| `buffers` | 3 Kafka broker | ключ сообщения | Kafka распределяет сообщения по разделам topic; порядок сохраняется внутри ключа | каждая запись хранится на трёх брокерах |
+
+Отдельно для `cards` используется routing hint:
+- seller-path сразу знает `seller_id` и идёт в нужный shard;
+- buyer-path получает `seller_id` из `card_search` или из `cards cache`, после чего обращается в нужный shard PostgreSQL.
 
 ### 6.7 Клиентские библиотеки / интеграции
 
@@ -604,35 +666,46 @@ DNS-схема:
 | OpenSearch | `opensearch-go` | Индексация и search API. |
 | ClickHouse | `clickhouse-go` | Запись и чтение из аналитического контура. |
 | Redis | `go-redis` | Работа с Redis Cluster и кешами. |
-| Kafka | `segmentio/kafka-go` | Producer и consumer для буферных потоков. |
-| S3-compatible Object Storage | `minio-go` | Работа с файлами, bucket и presigned URL. |
+| Kafka | `github.com/segmentio/kafka-go` | Producer и consumer для буферных потоков [[29]](https://github.com/segmentio/kafka-go). |
+| MinIO | `minio-go` | Работа с bucket, объектами и presigned URL. |
 
 ### 6.8 Балансировка запросов / мультиплексирование подключений
 
-| Контур | Запись | Чтение | Маршрутизация и пул соединений | Назначение |
+Используются следующие условные обозначения PostgreSQL-контуров:
+
+- `coredb` — `users`, `categories`, `locations`, `complaints`
+- `cardsdb` — `cards`
+- `mediadb` — `storage`
+- `favoritesdb` — `favorites`
+
+Для PostgreSQL применяется `PgBouncer` в режиме **transaction pooling**.  
+Этот режим подходит для коротких stateless OLTP-запросов и уменьшает стоимость большого числа подключений к PostgreSQL [[28]](https://www.pgbouncer.org/features.html).
+
+| Контур | Запись | Чтение | Маршрутизация и мультиплексирование подключений | Назначение |
 |---|---|---|---|---|
-| PostgreSQL `coredb` | только в основной узел | из основного узла или реплики | `PgBouncer`, запросы распределяются между соединениями из общего пула | Снижает стоимость большого числа коротких OLTP-подключений. |
-| PostgreSQL `cardsdb` | только в основной узел нужного shard | owner-path — из основного узла; buyer-path — из реплики | `PgBouncer`, запрос направляется в shard по `card_id` | Разделяет owner read-after-write и обычные чтения. |
-| PostgreSQL `mediadb` | только в основной узел нужного shard | из реплики | `PgBouncer`, запрос направляется в shard по `owner_user_id` | Сервисные чтения метаданных файлов. |
-| PostgreSQL `favoritesdb` | только в основной узел нужного shard | из реплики или Redis | `PgBouncer`, запрос направляется в shard по `user_id` | После записи состояние быстро попадает в кеш. |
+| PostgreSQL `coredb` | только в основной узел | из основного узла или реплики | `PgBouncer`, общий пул соединений | Снижает нагрузку на PostgreSQL по соединениям в не шардируемом контуре. |
+| PostgreSQL `cardsdb` | только в основной узел нужного shard | seller-path — из основного узла; buyer-path — из реплики | `PgBouncer`, выбор shard по `seller_id` | Группирует объявления продавца и разделяет owner read-after-write и обычные чтения. |
+| PostgreSQL `mediadb` | только в основной узел нужного shard | из реплики | `PgBouncer`, выбор shard по `owner_user_id` | Сервисные чтения метаданных файлов. |
+| PostgreSQL `favoritesdb` | только в основной узел нужного shard | из реплики или Redis | `PgBouncer`, выбор shard по `user_id` | После записи состояние быстро попадает в кеш. |
 | OpenSearch | пакетная индексация через координатор | поиск через координатор | координатор распределяет запрос по shard индекса | Кластер сам отправляет запросы в нужные shard. |
-| ClickHouse | запись через отдельный ingestion-сервис | чтение через распределённый слой кластера | клиент держит набор соединений к кластеру | Прямой write из API не используется. |
-| Redis | запись и чтение через cluster client | запись и чтение через cluster client | запрос направляется по ключу в нужный shard кеша | Ключ сразу попадает в нужный shard кеша. |
-| Kafka | producer пишет в ведущий раздел | consumer group читает разделы | сообщение направляется в нужный раздел по ключу | Буферные потоки автоматически распределяются между consumers. |
+| ClickHouse | запись через ingestion-service из Kafka | чтение через распределённый слой кластера | batched write + общий слой чтения поверх shard | Прямой write из API не используется. |
+| Redis | запись и чтение через cluster client | запись и чтение через cluster client | ключ сразу направляется в нужный shard Redis Cluster | Ускоряет hot read-path. |
+| Kafka | producer пишет в ведущий раздел | consumer group читает разделы | сообщение направляется в раздел по ключу | Буферные потоки автоматически распределяются между consumers. |
 
 ### 6.9 Схема резервного копирования
 
 Резервное копирование выполняет внутренний `backup-controller`.  
-Он запускает backup по расписанию и складывает артефакты в Object Storage.
+Он запускает backup по расписанию и складывает артефакты в **MinIO**.
 
 | Компонент | Механизм резервного копирования | Расписание | Хранение | Восстановление |
 |---|---|---|---|---|
 | PostgreSQL (`users`, `categories`, `locations`, `cards`, `storage`, `favorites`, `complaints`) | полный backup базы и постоянное сохранение журнала изменений | полный backup ежедневно, журнал изменений сохраняется постоянно | `7 дней` восстановление на момент времени, `8 недель` недельные копии, `12 месяцев` месячные копии | восстановление из полного backup и журнала изменений до нужного момента |
 | OpenSearch (`card_search`) | snapshot индекса | каждые `6 часов` | `14` ежедневных snapshot и `8` недельных snapshot | восстановление из snapshot, затем догрузка индекса из Kafka или полной переиндексацией |
 | ClickHouse (`event_log`) | полный backup и добавочные backup между ними | полный backup ежедневно, добавочный backup каждый час | `30` ежедневных backup и `12` месячных backup | восстановление из полного backup и последующих добавочных копий |
-| Redis | сохранение снимков памяти и журнала операций | снимок памяти каждые `15 минут`, выгрузка снимка в Object Storage ежедневно | снимки за последние `3 дня`, ежедневные выгрузки за последние `14 дней` | быстрый запуск из последнего состояния; при полной потере кеш заново прогревается из основных хранилищ |
-| Kafka | хранение сообщений в топиках в течение заданного времени | сообщения хранятся в Kafka постоянно в пределах retention | сообщения в топиках хранятся `3 дня` | пересоздание топиков и повторная загрузка производных данных из основных систем |
-| Object Storage | versioning bucket | versioning включён постоянно | версии файлов хранятся `30 дней`, затем удаляются по политике жизненного цикла | восстановление файлов из истории версий |
+| Redis | сохранение снимков памяти и журнала операций | снимок памяти каждые `15 минут`, выгрузка снимка в MinIO ежедневно | снимки за последние `3 дня`, ежедневные выгрузки за последние `14 дней` | быстрый запуск из последнего состояния; при полной потере кеш заново прогревается из основных хранилищ |
+| Kafka | хранение сообщений в topic в течение retention-окна | сообщения удерживаются в Kafka `3 дня` | отдельный backup не делается; используется retention в самом кластере | при потере производные данные пересобираются из основных хранилищ |
+| MinIO | versioning bucket | versioning включён постоянно | версии файлов хранятся `30 дней` | восстановление файлов из истории версий |
+
 
 ## Источники
 1. https://ads.avito.com/platform
@@ -654,3 +727,13 @@ DNS-схема:
 17. https://www.npiontko.pro/2024/12/27/capacity-planning-utilization
 18. https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers
 19. https://blog.cloudflare.com/measuring-network-connections-at-scale/
+20. https://www.min.io/
+21. https://docs.min.io/enterprise/aistor-object-store/administration/objects-and-versioning/versioning/
+22. https://docs.min.io/enterprise/aistor-object-store/operations/core-concepts/erasure-coding/
+23. https://docs.opensearch.org/latest/mappings/ 
+24. https://docs.opensearch.org/latest/mappings/mapping-parameters/doc-values/
+25. https://docs.opensearch.org/latest/mappings/supported-field-types/flat-object/ 
+26. https://docs.opensearch.org/latest/getting-started/intro/ 
+27. https://redis.io/docs/latest/operate/rs/monitoring/observability/ 
+28. https://www.pgbouncer.org/features.html
+29. https://github.com/segmentio/kafka-go
