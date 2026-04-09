@@ -213,6 +213,38 @@
 - Пиковое потребление: **41,13 Гбит/сек**
 - Суточный трафик: **134,68 ТБ/сутки**
 
+#### 2.2.4 Нагрузка на алгоритмические сервисы
+
+После выбора алгоритмов поиска и рекомендаций появляется дополнительная внутренняя нагрузка.
+
+В текущей версии расчёта численно оцениваются только те внутренние контуры, для которых база расчёта уже зафиксирована в разделе 2.
+
+Формулы:
+
+`RPS_avg = N_day / 86 400`
+
+`RPS_peak = 3 * RPS_avg`
+
+Для `feature-updater` входной поток считается как сумма событий, используемых в алгоритмах поиска и рекомендаций:
+
+`Events_feature_day = Q_day + V_day + Fav_day + C_day`
+
+Расчёт:
+
+`Events_feature_day = 140 000 000 + 141 997 830 + 7 099 892 + 2 545 613 = 291 643 335`
+
+`RPS_avg(feature-updater) = 291 643 335 / 86 400 = 3 375,50`
+
+`RPS_peak(feature-updater) = 3 * 3 375,50 = 10 126,50`
+
+#### Сводная таблица алгоритмической нагрузки
+
+| Контур                 | Что делает                                                                         | Основа расчёта                       | RPS_avg | RPS_peak | 
+|------------------------|------------------------------------------------------------------------------------|--------------------------------------|--------:|---------:|
+| `search-retrieval`     | retrieval кандидатов в OpenSearch                                                  | `Поиск/выдача`                       | 1620,37 |  4861,11 |
+| `feature-updater`      | обработка поведенческих сигналов из `event_log` и обновление производных признаков | `search + view + favorite + contact` | 3375,50 | 10126,50 |
+| `search-index-updater` | обновление `card_search` после изменения объявления                                | `CRUD объявлений`                    |   23,15 |    69,44 |
+
 ## 3. Глобальная балансировка нагрузки
 
 ### 3.1 Функциональное разбиение по доменам
@@ -410,8 +442,8 @@ DNS-схема:
 | `storage`     | Файловые данные: оригиналы фото и thumbnail-версии. Используется для хранения изображений объявлений и аватарок                                 |
 | `favorites`   | Текущее состояние избранного пользователя                                                                                                       |
 | `complaints`  | Жалобы на пользователя или объявление. Содержит также поля модерации: статус, приоритет, модератор, время решения                               |
-| `event_log`   | Общий журнал действий пользователей. Сюда записываются поиск, просмотр карточки, запрос контакта, изменение объявления, жалоба и другие события |
-| `card_search` | Денормализованная поисковая проекция объявления. Обновляется асинхронно после изменения `cards`                                                 |
+| `event_log`   | Общий журнал действий пользователей. Сюда записываются поиск, просмотр карточки, запрос контакта, изменение объявления, жалоба и другие события. Используется не только для аналитики, но и как источник поведенческих сигналов для поиска и рекомендаций, а также как входной поток для построения производных признаков |
+| `card_search` | Денормализованная поисковая проекция объявления. Обновляется асинхронно после изменения `cards`. Используется как retrieval-слой для поиска и как источник кандидатов для части recommendation path; хранит `ranking_features_json`, участвующие в ранжировании |
 
 ### 5.2 Суммарный объём хранения и нагрузки на чтение/запись
 
@@ -451,6 +483,13 @@ DNS-схема:
 - `favorites` — **32 Б**, как и в разделе 2;
 - `complaints` — **256 Б**, как и в разделе 2;
 - `event_log`, `card_search` —  размеры строк по составу полей.
+
+Для алгоритмов раздела 7 принимается, что:
+
+1. `event_log` является не только append-only журналом, но и входным источником для построения поисковых и рекомендательных признаков;
+2. `card_search` используется не только как поисковая проекция, но и как retrieval-контур для части recommendation pipeline;
+3. производные признаки не выделяются в отдельные source-of-truth таблицы;
+4. поисковые и рекомендательные сигналы хранятся в составе `ranking_features_json` и обновляются асинхронно.
 
 ### 5.3 Требования к консистентности
 
@@ -514,10 +553,10 @@ DNS-схема:
 | `media objects` | бинарные файлы | объектное хранение | Ceph RGW | 6 063 950,00 | на стороне Ceph | policy на стороне Ceph | Оригиналы фото и thumbnails. |
 | `favorites` | связь many-to-many | строковое OLTP-хранение | PostgreSQL | 23,04 | `4 shard, hash(user_id)` | `4 masters + 4 replicas` | Избранное пользователя. |
 | `complaints` | модерационная таблица | строковое OLTP-хранение | PostgreSQL | 2,18 | нет | `1 master + 1 replica` | Жалобы и статусы модерации. |
-| `event_log` | событийный журнал | append-only + columnar | ClickHouse | 1 080,00 | `2 shard + monthly partitioning` | `2 masters + 2 replicas` | Аналитический журнал действий пользователей. |
-| `card_search` | поисковая проекция | document store + inverted index | OpenSearch | 225,28 | `8 primary shard, doc_id = card_id` | `1 replica на каждый primary shard` | Полнотекстовый поиск, фильтры, сортировки, геопоиск. |
-| `caches` | кеширующий слой | key-value | Redis | 7,76 | нет | `1 master + 1 replica` | Кэши `categories`, `locations`, `cards`, `favorites`. |
-| `buffers` | буферный слой | log / topic | Kafka | retention-based | `partition by key` | `replication factor = 3` | Буферы между OLTP, search, analytics и media pipeline. |
+| `event_log` | событийный журнал | append-only + columnar | ClickHouse | 1 080,00 | `2 shard + monthly partitioning` | `2 masters + 2 replicas` | Аналитический журнал действий пользователей и входной поток для построения производных признаков `search/recommendation pipeline` |
+| `card_search` | поисковая проекция | document store + inverted index | OpenSearch | 225,28 | `8 primary shard, doc_id = card_id` | `1 replica на каждый primary shard` | Полнотекстовый поиск, фильтры, сортировки, геопоиск; retrieval-слой для `search path` и части `recommendation path` |
+| `caches` | кеширующий слой | key-value | Redis | 7,76 | нет | `1 master + 1 replica` | Кэши `categories`, `locations`, `cards`, `favorites`; короткоживущие служебные hot-path кэши для `search/recommendation path` |
+| `buffers` | буферный слой | log / topic | Kafka | retention-based | `partition by key` | `replication factor = 3` | Буферы между OLTP, search, analytics, media pipeline и pipeline построения производных признаков |
 
 ### 6.3 Индексы
 
@@ -579,18 +618,19 @@ DNS-схема:
 `209,8 GiB / 8 = 26,2 GiB на один primary shard`
 
 #### Таблица полей документа `card_search`
-| Поле | Тип OpenSearch | Индексация | Назначение |
-|---|---|---|---|
-| `card_id` | `keyword` | exact match | Идентификатор документа и точечное обновление документа. |
-| `seller_id` | `keyword` | filter | Фильтр по продавцу и служебные выборки. |
-| `category_id` | `keyword` | filter + aggregation | Фильтр по категории и агрегации по категориям. |
-| `location_id` | `keyword` | filter + aggregation | Фильтр по локации и агрегации по географии. |
-| `title` | `text` + `title.raw: keyword` | full-text + exact | Полнотекстовый поиск по названию; `title.raw` используется для exact match, сортировок и агрегаций. |
-| `price_minor` | `long` | range + sort | Фильтр по диапазону цен и сортировка по цене. |
-| `status` | `keyword` | filter | Фильтр по статусу объявления. |
-| `attributes_json.*` | `keyword` / `long` / `double` / `boolean` | filter | Категорийные атрибуты для facet-фильтров. |
-| `ranking_features_json.*` | numeric fields | sort / ranking | Предрассчитанные сигналы ранжирования. |
-| `updated_at` | `date` | sort + range | Сортировка по дате обновления и фильтры по времени. |
+| Поле                      | Тип OpenSearch                            | Индексация           | Назначение                                                                                          |
+|---------------------------|-------------------------------------------|----------------------|-----------------------------------------------------------------------------------------------------|
+| `card_id`                 | `keyword`                                 | exact match          | Идентификатор документа и точечное обновление документа.                                            |
+| `seller_id`               | `keyword`                                 | filter               | Фильтр по продавцу и служебные выборки.                                                             |
+| `category_id`             | `keyword`                                 | filter + aggregation | Фильтр по категории и агрегации по категориям.                                                      |
+| `location_id`             | `keyword`                                 | filter + aggregation | Фильтр по локации и агрегации по географии.                                                         |
+| `title`                   | `text` + `title.raw: keyword`             | full-text + exact    | Полнотекстовый поиск по названию; `title.raw` используется для exact match, сортировок и агрегаций. |
+| `price_minor`             | `long`                                    | range + sort         | Фильтр по диапазону цен и сортировка по цене.                                                       |
+| `status`                  | `keyword`                                 | filter               | Фильтр по статусу объявления.                                                                       |
+| `attributes_json.*`       | `keyword` / `long` / `double` / `boolean` | filter               | Категорийные атрибуты для facet-фильтров.                                                           |
+| `ranking_features_json.*` | numeric fields                            | sort / ranking       | Предрассчитанные сигналы ранжирования.                                                              |
+| `updated_at`              | `date`                                    | sort + range         | Сортировка по дате обновления и фильтры по времени.                                                 |
+| `item_embedding`          | `knn_vector`                              |                      | для `recommendation retrieval` по близости векторов                                                 |
 
 ### 6.5 Денормализация
 
@@ -627,12 +667,7 @@ DNS-схема:
 - для `categories cache`, `locations cache`, `favorites cache`  
   `RPS_read_peak = RPS_read * k_peak`
 - для `cards cache`  
-  `RPS_read_peak = RPS_peak(card view) = 4 930,48`, так как кэшируется именно готовый ответ API просмотра карточки
-
-Для горячих mutable-кэшей используется расчётная модель:
-
-- один update инвалидирует один cache key;
-- следующий доступ к этому key даёт один miss.
+  `RPS_read_peak = RPS_peak(card view) = 4 930,48` - кэшируется именно готовый ответ API просмотра карточки
 
 Формулы:
 
@@ -657,7 +692,7 @@ DNS-схема:
 |---|---|---|---|---|
 | `cards-upsert` | Kafka | Seller API, moderation service | search indexer | Асинхронное обновление `card_search` после изменения объявления. |
 | `cards-delete` | Kafka | Seller API, moderation service | search indexer | Удаление или скрытие объявления из поисковой проекции. |
-| `user-actions` | Kafka | Buyer API, Seller API | ClickHouse ingestor, anti-fraud, ranking pipeline | Вывод пользовательских действий из OLTP в аналитический контур. |
+| `user-actions` | Kafka | Buyer API, Seller API | ClickHouse ingestor, anti-fraud, search feature updater, recommendation feature updater, ranking pipeline | Вывод пользовательских действий из OLTP в аналитический и алгоритмический контур |
 | `moderation-events` | Kafka | moderation service | search indexer | Синхронизация `card_search` после модерации. |
 | `media-events` | Kafka | media service | thumbnail worker, metadata updater | Асинхронная обработка изображений и обновление метаданных. |
 
