@@ -652,8 +652,6 @@ DNS-схема:
 
 #### 6.6.1 Кеши
 
-Используется паттерн **cache-aside** [[24]](https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside)
-
 Метрика cache hit ratio считается по формуле Redis:
 
 `CHR = cache_hits / (cache_hits + cache_misses)` [[25]](https://redis.io/docs/latest/operate/rs/monitoring/get-started/)
