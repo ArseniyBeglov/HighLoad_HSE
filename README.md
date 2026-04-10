@@ -531,7 +531,7 @@ DNS-схема:
 - **Ceph Object Gateway (RGW)** — основное **S3-compatible object storage** для медиа-объектов;
 - **OpenSearch** — поисковая проекция `card_search`;
 - **ClickHouse** — append-only журнал событий `event_log`;
-- **Redis** — кэши `categories`, `locations`, `cards`, `favorites`;
+- **Redis** — кэши `categories`, `locations`, `cards`, `favorites`, а также короткоживущие пользовательские embedding-векторы для online recommendation path;
 - **Kafka** — буферные потоки между OLTP, search, analytics и media-processing.
 
 **Выбор object storage:**  
@@ -630,7 +630,11 @@ DNS-схема:
 | `attributes_json.*`       | `keyword` / `long` / `double` / `boolean` | filter               | Категорийные атрибуты для facet-фильтров.                                                           |
 | `ranking_features_json.*` | numeric fields                            | sort / ranking       | Предрассчитанные сигналы ранжирования.                                                              |
 | `updated_at`              | `date`                                    | sort + range         | Сортировка по дате обновления и фильтры по времени.                                                 |
-| `item_embedding`          | `knn_vector`                              |                      | для `recommendation retrieval` по близости векторов                                                 |
+| `item_embedding`          | `knn_vector`                              | vector search        | векторное представление объявления для `recommendation retrieval` по близости векторов               |
+
+На зрелом этапе `item_embedding` хранится в документе объявления внутри OpenSearch.
+
+Пользовательские embeddings в OpenSearch не хранятся. Они хранятся как короткоживущие производные данные в Redis по ключу `user_embedding:{user_id}`. Эти данные пересчитываются из `event_log` через Kafka `user-actions` и используются `recommendation-service` как online-представление пользователя при запросе к OpenSearch.
 
 ### 6.5 Денормализация
 
@@ -685,6 +689,8 @@ DNS-схема:
 | `locations cache` | `locations:tree:v1` | Полное дерево локаций | `3000 * 128 Б = 384 000 Б` | `1 час` | 4 999,92 | 1 | 0,38 МБ | ≈ 100% | `1 master + 1 replica` |
 | `cards cache` | `card:view:{card_id}` | Готовый JSON карточки без изображений | `2000 Б + 256 Б + 32 Б = 2288 Б` | `5 минут` | 4 930,48 | 1 479 144 | 3,38 ГБ | 98,59% | `1 master + 1 replica` |
 | `favorites cache` | `favorites:{user_id}` | Список `card_id` из избранного пользователя | `10 * 32 Б = 320 Б` | `5 минут` | 5 176,98 | 1 553 094 | 0,50 ГБ | 95,24% | `1 master + 1 replica` |
+| `user embedding cache` | `user_embedding:{user_id}` | Пользовательский embedding для online retrieval в recommendation path | зависит от размерности вектора | короткий TTL | не фиксируется отдельно | recommendation hotset | не фиксируется отдельно | не фиксируется отдельно | `1 master + 1 replica` |
+
 
 #### 6.6.2 Буферы
 
@@ -848,75 +854,6 @@ Read-write split выполняется по отдельным PgBouncer-кон
 | Новые объявления без истории    | повышение веса новых объявлений и учёт доверия к продавцу                                                                                                 |
 | Однообразная выдача             | удаление повторяющихся карточек и ограничение числа объявлений одного продавца                                                                            |
 
-#### 7.2.6 Сравнение вариантов
-
-| Вариант                | Итог                           |
-| ---------------------- | ------------------------------ |
-| SQL / FTS в PostgreSQL | не выбран                      |
-| Pure lexical search    | выбран как базовый вариант MVP |
-| Pure semantic search   | не выбран для MVP              |
-| Hybrid search          | этап 2                         |
-
-Гибридный поиск не используется как базовый режим MVP, но архитектурно допускается на следующем этапе. OpenSearch поддерживает `hybrid search` как комбинацию keyword и vector search в одном поисковом пайплайне.
-
-#### 7.2.7 Пример поискового запроса в OpenSearch
-
-```json
-POST /card_search/_search
-{
-  "size": 50,
-  "query": {
-    "function_score": {
-      "query": {
-        "bool": {
-          "must": [
-            {
-              "multi_match": {
-                "query": "iphone 13 128",
-                "fields": ["title^3", "attributes_json.brand^2", "attributes_json.model^2"]
-              }
-            }
-          ],
-          "filter": [
-            { "term": { "status": "active" } },
-            { "term": { "category_id": 1101 } },
-            { "term": { "location_id": 7700000000000 } },
-            {
-              "range": {
-                "price_minor": {
-                  "gte": 3000000,
-                  "lte": 6000000
-                }
-              }
-            }
-          ]
-        }
-      },
-      "functions": [
-        {
-          "field_value_factor": {
-            "field": "ranking_features_json.seller_rating",
-            "factor": 0.2,
-            "missing": 0
-          }
-        },
-        {
-          "gauss": {
-            "updated_at": {
-              "origin": "now",
-              "scale": "7d",
-              "offset": "1d"
-            }
-          }
-        }
-      ],
-      "score_mode": "sum",
-      "boost_mode": "sum"
-    }
-  }
-}
-```
-
 ### 7.3 Алгоритм рекомендательной ленты объявлений
 
 #### 7.3.1 Блок применения и постановка задачи
@@ -1022,9 +959,11 @@ POST /card_search/_search
 Практически это работает так:
 
 1. По истории пользователя строится пользовательский вектор.
-2. По каталогу объявлений заранее строятся векторы карточек.
-3. По близости векторов выполняется быстрый отбор кандидатов.
-4. На найденном наборе кандидатов выполняется отдельное финальное ранжирование.
+2. Полученный пользовательский вектор хранится как короткоживущие производные данные в Redis и используется `recommendation-service` в online path.
+3. По каталогу объявлений заранее строятся векторы карточек.
+4. Векторы карточек хранятся в OpenSearch в поле `item_embedding`.
+5. По близости векторов выполняется быстрый отбор кандидатов.
+6. На найденном наборе кандидатов выполняется отдельное финальное ранжирование.
 
 Финальный score на зрелом этапе:
 
@@ -1034,21 +973,20 @@ POST /card_search/_search
 
 ## 8. Технологии
 
-| Технология                       | Область применения                                                                                                     | Мотивация выбора                                                                                                                                                                                     |
-|----------------------------------|------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Go                               | Основной backend-контур: Buyer API, Seller API, работа с PostgreSQL, OpenSearch, ClickHouse, Redis и Kafka             | В проекте именно для Go зафиксированы основные клиентские интеграции с ключевыми инфраструктурными компонентами, поэтому на нём удобно держать основной серверный контур без лишнего смешения стеков |
-| .NET                             | Media-контур и взаимодействие с `Ceph RGW` через S3-compatible API                                                     | В работе отдельно зафиксирована интеграция с `Ceph RGW / S3` через `AWSSDK.S3`, поэтому .NET используется точечно там, где нужен доступ к объектному хранилищу и обработке медиа                     |
-| Cloud.ru Evolution Load Balancer | L4-балансировка для доменов `www.resale.ru`, `api.resale.ru`, `seller.resale.ru`                                       | В проекте принята схема разделения L4 и L7: L4-балансировщик не выполняет TLS termination и используется как внешний слой распределения трафика перед L7-группами                                    |
-| NGINX ingress / reverse-proxy    | L7-балансировка, SSL termination, HTTP/HTTPS-маршрутизация, распределение запросов по backend-сервисам                 | В проекте TLS завершается на L7, а сами L7-группы масштабируются независимо по доменам и типам нагрузки                                                                                              |
-| CDN                              | Доставка изображений через `img.resale.ru` и статики через `static.resale.ru`                                          | В работе принят один датацентр в Москве, поэтому CDN нужен для разгрузки основного контура и компенсации задержек для удалённых регионов                                                             |
-| PostgreSQL                       | OLTP-контур: `users`, `categories`, `locations`, `cards`, `storage`, `favorites`, `complaints`                         | PostgreSQL выбран как транзакционное хранилище для сущностей, где важны сильная консистентность, owner-path, справочники и точечные изменения состояния                                              |
-| PgBouncer                        | Пулы подключений и read-write split для PostgreSQL-контуров                                                            | В физической схеме уже зафиксированы отдельные RW- и RO-контуры, поэтому PgBouncer нужен для мультиплексирования подключений и выноса чтений на replicas                                             |
-| Ceph Object Gateway (RGW)        | Основное объектное хранилище для оригиналов фото, thumbnails, backup-артефактов                                        | В проекте нужен масштабируемый S3-compatible storage под большой объём медиа, поэтому Ceph RGW закрывает хранение файлов и резервных копий через единый объектный API                                |
-| OpenSearch                       | Поисковая проекция `card_search`, полнотекстовый поиск, фильтры, сортировки, геопоиск, дальнейший hybrid/vector search | Поиск является основным способом навигации по каталогу, а отдельная поисковая проекция позволяет не нагружать OLTP-контур и развивать поиск от lexical-first MVP к более сложным сценариям           |
-| ClickHouse                       | `event_log`, аналитический контур, хранение append-only событий пользователей                                          | В работе `event_log` выделен в отдельный аналитический контур с высокой нагрузкой на запись и партиционированием по времени, что хорошо соответствует модели ClickHouse                              |
-| Redis                            | Кэши `categories`, `locations`, `cards`, `favorites`                                                                   | Redis используется как hot-path cache по схеме cache-aside для снижения нагрузки на основные хранилища и ускорения частых чтений                                                                     |
-| Kafka                            | Буферные потоки `cards-upsert`, `cards-delete`, `user-actions`, `moderation-events`, `media-events`                    | Kafka разделяет OLTP, search, analytics и media-processing, позволяет обновлять производные данные асинхронно и сглаживать пиковую нагрузку между контурами                                          |
-
+| Технология                       | Область применения                                                                                                     | Мотивация выбора                                                                                    |
+|----------------------------------|------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
+| Go                               | Основной backend-контур: Buyer API, Seller API, работа с PostgreSQL, OpenSearch, ClickHouse, Redis и Kafka             | Основной серверный стек и клиентские интеграции с PostgreSQL, OpenSearch, ClickHouse, Redis и Kafka |
+| .NET                             | Media-контур и взаимодействие с `Ceph RGW` через S3-compatible API                                                     | Работа с `Ceph RGW / S3` через `AWSSDK.S3`                                                          |
+| Cloud.ru Evolution Load Balancer | L4-балансировка для доменов `www.resale.ru`, `api.resale.ru`, `seller.resale.ru`                                       | Внешняя L4-балансировка перед L7-контуром                                                           |
+| NGINX ingress / reverse-proxy    | L7-балансировка, SSL termination, HTTP/HTTPS-маршрутизация, распределение запросов по backend-сервисам                 | SSL termination и маршрутизация запросов на уровне L7                                               |
+| CDN                              | Доставка изображений через `img.resale.ru` и статики через `static.resale.ru`                                          | Разгрузка основного контура и снижение задержек при доставке медиа и статики                        |
+| PostgreSQL                       | OLTP-контур: `users`, `categories`, `locations`, `cards`, `storage`, `favorites`, `complaints`                         | Транзакционное хранение, справочники, owner-path, точечные изменения состояния                      |
+| PgBouncer                        | Пулы подключений и read-write split для PostgreSQL-контуров                                                            | Мультиплексирование подключений и разделение RW / RO-трафика                                        |
+| Ceph Object Gateway (RGW)        | Основное объектное хранилище для оригиналов фото, thumbnails, backup-артефактов                                        | S3-compatible object storage для медиа и backup-артефактов                                          |
+| OpenSearch                       | Поисковая проекция `card_search`, полнотекстовый поиск, фильтры, сортировки, геопоиск, дальнейший hybrid/vector search | Отдельный search-контур для поиска, фильтрации, сортировки и retrieval                              |
+| ClickHouse                       | `event_log`, аналитический контур, хранение append-only событий пользователей                                          | Высокий поток записи событий и аналитические чтения по `event_log`                                  |
+| Redis                            | Кэши `categories`, `locations`, `cards`, `favorites`, user embeddings                                                  | Hot-path cache и хранение короткоживущих производных данных                                         |
+| Kafka                            | Буферные потоки `cards-upsert`, `cards-delete`, `user-actions`, `moderation-events`, `media-events`                    | Асинхронные буферы между OLTP, search, analytics, recommendation и media-контурами                  |
 
 ## Источники
 1. https://ads.avito.com/platform
