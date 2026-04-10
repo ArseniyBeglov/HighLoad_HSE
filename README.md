@@ -632,9 +632,7 @@ DNS-схема:
 | `updated_at`              | `date`                                    | sort + range         | Сортировка по дате обновления и фильтры по времени.                                                 |
 | `item_embedding`          | `knn_vector`                              | vector search        | векторное представление объявления для `recommendation retrieval` по близости векторов               |
 
-На зрелом этапе `item_embedding` хранится в документе объявления внутри OpenSearch.
 
-Пользовательские embeddings в OpenSearch не хранятся. Они хранятся как короткоживущие производные данные в Redis по ключу `user_embedding:{user_id}`. Эти данные пересчитываются из `event_log` через Kafka `user-actions` и используются `recommendation-service` как online-представление пользователя при запросе к OpenSearch.
 
 ### 6.5 Денормализация
 
@@ -690,6 +688,8 @@ DNS-схема:
 | `cards cache` | `card:view:{card_id}` | Готовый JSON карточки без изображений | `2000 Б + 256 Б + 32 Б = 2288 Б` | `5 минут` | 4 930,48 | 1 479 144 | 3,38 ГБ | 98,59% | `1 master + 1 replica` |
 | `favorites cache` | `favorites:{user_id}` | Список `card_id` из избранного пользователя | `10 * 32 Б = 320 Б` | `5 минут` | 5 176,98 | 1 553 094 | 0,50 ГБ | 95,24% | `1 master + 1 replica` |
 | `user embedding cache` | `user_embedding:{user_id}` | Пользовательский embedding для online retrieval в recommendation path | зависит от размерности вектора | короткий TTL | не фиксируется отдельно | recommendation hotset | не фиксируется отдельно | не фиксируется отдельно | `1 master + 1 replica` |
+
+`user embedding cache` хранятся как короткоживущие производные данные в Redis по ключу `user_embedding:{user_id}`. Эти данные пересчитываются из `event_log` через Kafka `user-actions` и используются `recommendation-service` как online-представление пользователя при запросе к OpenSearch.
 
 
 #### 6.6.2 Буферы
