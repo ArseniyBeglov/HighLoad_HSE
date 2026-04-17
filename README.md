@@ -984,38 +984,37 @@ Read-write split выполняется по отдельным PgBouncer-кон
 
 | Компонент | Схема резервирования | Как используется |
 |---|---|---|
-| Kubernetes-размещение | `AZ-1`, `AZ-2`, `AZ-3` + `topology spread constraints` [[41]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[42]](https://kubernetes.io/docs/setup/best-practices/multiple-zones/) | `AZ-1`, `AZ-2`, `AZ-3` — три зоны отказа Kubernetes-кластера; реплики критичных сервисов распределяются по разным зонам |
-| L4 | `3` независимых L4-балансировщика: `www.resale.ru`, `api.resale.ru`, `seller.resale.ru` | каждый внешний контур изолирован; отказ одного L4 не затрагивает остальные домены |
-| L7 `NGINX ingress / reverse-proxy` | схема `N+1`: `www` — `2` ноды, `api` — `5` нод, `seller` — `4` ноды | L7-ноды каждой группы распределяются по `AZ-1`, `AZ-2`, `AZ-3`; отказ одной ноды не останавливает группу |
-| Buyer API, Seller API | `3 replica`, по `1` pod в каждой AZ | stateless-контуры; трафик распределяется через L7, отказ одного pod не останавливает сервис |
-| Kafka consumers | `2 replica` + Kafka | используется для асинхронной обработки через `cards-upsert`, `cards-delete`, `user-actions`, `moderation-events`, `media-events`; сообщения остаются в Kafka и дочитываются после восстановления |
-| PostgreSQL | без шардирования — `1 primary + 2 replicas`; для shard-контуров — `1 primary + 1 replica` на shard; `Patroni + etcd (3 узла)` [[43]](https://patroni.readthedocs.io/en/latest/) [[44]](https://etcd.io/docs/v3.3/faq/) | схема используется для `coredb`, `cardsdb`, `mediadb`, `favoritesdb`, `complaints`; Patroni определяет текущий `primary` и выполняет автоматическое переключение |
-| PgBouncer | отдельные контуры `RW` и `RO` для каждого PostgreSQL-контура | `RW` направляет запись в текущий `primary`, выбранный Patroni; `RO` направляет чтение в `replica` |
-| Redis | `1 primary + 1 replica + 3 Sentinel` [[45]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) | Sentinel контролирует `primary`, выбирает новый `primary` при сбое и публикует новый адрес master |
-| OpenSearch `card_search` | `8 primary shard + 1 replica` + `shard allocation awareness` по зонам [[46]](https://docs.opensearch.org/latest/tuning-your-cluster/) | `primary` и `replica` одного shard размещаются в разных AZ; потеря одного узла данных не должна приводить к потере индекса |
-| ClickHouse `event_log` | `2 shard × 2 replica + ClickHouse Keeper (3 узла)` [[47]](https://clickhouse.com/docs/architecture/replication) | Keeper обеспечивает координацию репликации и согласованное выполнение изменений схемы на узлах кластера |
-| Kafka | `replication factor = 3` [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) | при потере одного broker лидер `partition` переизбирается из `replica` |
-| Ceph RGW | `storage-level redundancy + bucket versioning` [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) | версии объектов позволяют восстанавливать объект после ошибочного удаления или перезаписи |
+| Kubernetes-размещение | AZ-1, AZ-2, AZ-3 + topology spread constraints [[41]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[42]](https://kubernetes.io/docs/setup/best-practices/multiple-zones/) | AZ-1, AZ-2, AZ-3 — три зоны отказа Kubernetes-кластера; реплики критичных сервисов распределяются по разным зонам |
+| L4 | 3 независимых L4-балансировщика: www.resale.ru, api.resale.ru, seller.resale.ru | каждый внешний контур изолирован; отказ одного L4 не затрагивает остальные домены |
+| L7 NGINX ingress / reverse-proxy | схема N+1: www — 2 ноды, api — 5 нод, seller — 4 ноды | L7-ноды каждой группы распределяются по AZ-1, AZ-2, AZ-3; отказ одной ноды не останавливает группу |
+| Buyer API, Seller API | 3 replica, по 1 pod в каждой AZ | stateless-контуры; трафик распределяется через L7, отказ одного pod не останавливает сервис |
+| Kafka consumers | 2 replica + Kafka | используется для асинхронной обработки через cards-upsert, cards-delete, user-actions, moderation-events, media-events; сообщения остаются в Kafka и дочитываются после восстановления |
+| PostgreSQL | без шардирования — 1 primary + 2 replicas; для shard-контуров — 1 primary + 1 replica на shard; Patroni + etcd (3 узла) [[43]](https://patroni.readthedocs.io/en/latest/) [[44]](https://etcd.io/docs/v3.3/faq/) | схема используется для coredb, cardsdb, mediadb, favoritesdb, complaints; Patroni определяет текущий primary и выполняет автоматическое переключение |
+| PgBouncer | отдельные контуры RW и RO для каждого PostgreSQL-контура | RW направляет запись в текущий primary, выбранный Patroni; RO направляет чтение в replica |
+| Redis | 1 primary + 1 replica + 3 Sentinel [[45]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) | Sentinel контролирует primary, выбирает новый primary при сбое и публикует новый адрес master |
+| OpenSearch card_search | 8 primary shard + 1 replica + shard allocation awareness по зонам [[46]](https://docs.opensearch.org/latest/tuning-your-cluster/) | primary и replica одного shard размещаются в разных AZ; потеря одного узла данных не должна приводить к потере индекса |
+| ClickHouse event_log | 2 shard × 2 replica + ClickHouse Keeper (3 узла) [[47]](https://clickhouse.com/docs/architecture/replication) | Keeper обеспечивает координацию репликации и согласованное выполнение изменений схемы на узлах кластера |
+| Kafka | replication factor = 3 [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) | при потере одного broker лидер partition переизбирается из replica |
+| Ceph RGW | storage-level redundancy + bucket versioning [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) | версии объектов позволяют восстанавливать объект после ошибочного удаления или перезаписи |
 
 ### 9.2 Сводная таблица отказов
 
 | Сбой | Последствие | Как компенсируется |
 |---|---|---|
-| `AZ-1` | теряется часть pod-реплик и часть L7-ёмкости | нагрузка остаётся в `AZ-2` и `AZ-3`; Kubernetes продолжает размещение сервисов в оставшихся зонах [[41]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[42]](https://kubernetes.io/docs/setup/best-practices/multiple-zones/) |
-| одна L7-нода | уменьшается запас по пропускной способности L7-группы | группа продолжает работу по схеме `N+1`; трафик идёт через оставшиеся ноды |
+| AZ-1 | теряется часть pod-реплик и часть L7-ёмкости | нагрузка остаётся в AZ-2 и AZ-3; Kubernetes продолжает размещение сервисов в оставшихся зонах [[41]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[42]](https://kubernetes.io/docs/setup/best-practices/multiple-zones/) |
+| одна L7-нода | уменьшается запас по пропускной способности L7-группы | группа продолжает работу по схеме N+1; трафик идёт через оставшиеся ноды |
 | экземпляр Buyer API / Seller API | уменьшается запас по соответствующему сервису | pod перезапускается, трафик уходит на живые экземпляры в других AZ |
 | Kafka consumer | обработка фоновых задач замедляется | сообщения остаются в Kafka и дочитываются после восстановления экземпляра |
-| экземпляр PgBouncer | уменьшается запас по pool соединений | клиенты переподключаются к другим экземплярам того же `RW` или `RO` контура |
-| `primary` PostgreSQL | кратковременная пауза записи в затронутом контуре | Patroni переводит `replica` в новый `primary`, `RW` PgBouncer направляет новые соединения на него [[43]](https://patroni.readthedocs.io/en/latest/) |
-| большинство узлов `etcd` недоступно | автоматическое переключение PostgreSQL недоступно | текущий `primary` может продолжать работу, но новое автоматическое переключение невозможно до восстановления большинства узлов `etcd` [[44]](https://etcd.io/docs/v3.3/faq/) |
-| `primary` Redis | временно растут задержки и число `cache miss` | Sentinel выбирает новый `primary`, клиенты переключаются на него, горячие ключи прогреваются повторно [[45]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) |
-| один узел данных OpenSearch | часть shard начинает перераспределение, запас по search-кластеру уменьшается | поиск продолжается за счёт `replica shard`, после восстановления узла или перераспределения shard кластер возвращается в штатное состояние [[46]](https://docs.opensearch.org/latest/tuning-your-cluster/) |
+| экземпляр PgBouncer | уменьшается запас по pool соединений | клиенты переподключаются к другим экземплярам того же RW или RO контура |
+| primary PostgreSQL | кратковременная пауза записи в затронутом контуре | Patroni переводит replica в новый primary, RW PgBouncer направляет новые соединения на него [[43]](https://patroni.readthedocs.io/en/latest/) |
+| большинство узлов etcd недоступно | автоматическое переключение PostgreSQL недоступно | текущий primary может продолжать работу, но новое автоматическое переключение невозможно до восстановления большинства узлов etcd [[44]](https://etcd.io/docs/v3.3/faq/) |
+| primary Redis | временно растут задержки и число cache miss | Sentinel выбирает новый primary, клиенты переключаются на него, горячие ключи прогреваются повторно [[45]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) |
+| один узел данных OpenSearch | часть shard начинает перераспределение, запас по search-кластеру уменьшается | поиск продолжается за счёт replica shard, после восстановления узла или перераспределения shard кластер возвращается в штатное состояние [[46]](https://docs.opensearch.org/latest/tuning-your-cluster/) |
 | большинство узлов ClickHouse Keeper недоступно | останавливается координация репликации и согласованное выполнение изменений схемы | уже записанные данные сохраняются; после восстановления большинства узлов репликация продолжает работу [[47]](https://clickhouse.com/docs/architecture/replication) |
-| один broker Kafka | возможно увеличение отставания consumer от очереди сообщений | лидер `partition` переизбирается из `replica`, продюсеры и consumer group продолжают работу [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) |
-| `search-index-updater` | замедляется обновление `card_search` | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
-| `feature-updater` | замедляется обновление производных признаков | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
+| один broker Kafka | возможно увеличение отставания consumer от очереди сообщений | лидер partition переизбирается из replica, продюсеры и consumer group продолжают работу [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) |
+| search-index-updater | замедляется обновление card_search | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
+| feature-updater | замедляется обновление производных признаков | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
 | Ceph RGW | замедляется выдача медиа | объект не должен теряться за счёт резервирования на уровне хранилища; ошибочно удалённый объект восстанавливается из versioning [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) |
-
 ## Источники
 1. https://ads.avito.com/platform
 2. https://tass.ru/ekonomika/16064459
