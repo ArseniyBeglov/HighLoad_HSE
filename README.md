@@ -998,7 +998,7 @@ Read-write split выполняется по отдельным PgBouncer-кон
 | Ceph RGW | storage-level redundancy + bucket versioning [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) | версии объектов позволяют восстанавливать объект после ошибочного удаления или перезаписи |
 
 ## 10. Схема проекта
-![img_5.png](img_5.png)
+![img_6.png](img_6.png)
 
 
 ## Источники
