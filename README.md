@@ -997,25 +997,6 @@ Read-write split выполняется по отдельным PgBouncer-кон
 | Kafka | replication factor = 3 [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) | при потере одного broker лидер partition переизбирается из replica |
 | Ceph RGW | storage-level redundancy + bucket versioning [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) | версии объектов позволяют восстанавливать объект после ошибочного удаления или перезаписи |
 
-### 9.2 Сводная таблица отказов
-
-| Сбой | Последствие | Как компенсируется |
-|---|---|---|
-| одна группа узлов Kubernetes | теряется часть pod-реплик и часть L7-ёмкости | нагрузка остаётся на двух остальных группах узлов; Kubernetes продолжает размещение сервисов на оставшихся узлах [[41]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) |
-| одна L7-нода | уменьшается запас по пропускной способности L7-группы | группа продолжает работу по схеме N+1; трафик идёт через оставшиеся ноды |
-| экземпляр Buyer API / Seller API | уменьшается запас по соответствующему сервису | pod перезапускается, трафик уходит на живые экземпляры в других группах узлов |
-| Kafka consumer | обработка фоновых задач замедляется | сообщения остаются в Kafka и дочитываются после восстановления экземпляра |
-| экземпляр PgBouncer | уменьшается запас по pool соединений | клиенты переподключаются к другим экземплярам того же RW или RO контура |
-| primary PostgreSQL | кратковременная пауза записи в затронутом контуре | Patroni переводит replica в новый primary, RW PgBouncer направляет новые соединения на него [[43]](https://patroni.readthedocs.io/en/latest/) |
-| большинство узлов etcd недоступно | автоматическое переключение PostgreSQL недоступно | текущий primary может продолжать работу, но новое автоматическое переключение невозможно до восстановления большинства узлов etcd [[44]](https://etcd.io/docs/v3.3/faq/) |
-| primary Redis | временно растут задержки и число cache miss | Sentinel выбирает новый primary, клиенты переключаются на него, горячие ключи прогреваются повторно [[45]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) |
-| один узел данных OpenSearch | часть shard начинает перераспределение, запас по search-кластеру уменьшается | поиск продолжается за счёт replica shard, после восстановления узла или перераспределения shard кластер возвращается в штатное состояние [[46]](https://docs.opensearch.org/latest/tuning-your-cluster/) |
-| большинство узлов ClickHouse Keeper недоступно | останавливается координация репликации и согласованное выполнение изменений схемы | уже записанные данные сохраняются; после восстановления большинства узлов репликация продолжает работу [[47]](https://clickhouse.com/docs/architecture/replication) |
-| один broker Kafka | возможно увеличение отставания consumer от очереди сообщений | лидер partition переизбирается из replica, продюсеры и consumer group продолжают работу [[48]](https://kafka.apache.org/41/operations/basic-kafka-operations/) |
-| search-index-updater | замедляется обновление card_search | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
-| feature-updater | замедляется обновление производных признаков | сообщения накапливаются в Kafka и дочитываются после восстановления consumer |
-| Ceph RGW | замедляется выдача медиа | объект не должен теряться за счёт резервирования на уровне хранилища; ошибочно удалённый объект восстанавливается из versioning [[49]](https://docs.ceph.com/en/latest/radosgw/s3/bucketops/) |
-
 ## 10. Схема проекта
 ![img_4.png](img_4.png)
 
