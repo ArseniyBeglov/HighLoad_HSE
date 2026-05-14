@@ -1000,6 +1000,70 @@ Read-write split выполняется по отдельным PgBouncer-кон
 ## 10. Схема проекта
 ![img_7.png](img_7.png)
 
+## 11. Список серверов
+
+### 11.1 Спецификация оборудования
+
+| Контур | Размещение | Конфигурация | Кол-во | Сервисы | ₽/мес |
+|---|---|---:|---:|---|---:|
+| `k8s-app` | Managed Kubernetes | 16 vCPU / 128 GB RAM | 15 | L7 NGINX, API, Search, Recommendation, workers, PgBouncer | 527 413 |
+| `pg-core` | VM | 16 vCPU / 64 GB RAM / 100 GB NVMe | 3 | `users`, `categories`, `locations`, `complaints` | 73 368 |
+| `pg-cards-media` | VM | 16 vCPU / 64 GB RAM / 300 GB NVMe | 24 | `cards`, `storage metadata`, 8 shard × 3 nodes | 642 514 |
+| `pg-favorites` | VM | 4 vCPU / 16 GB RAM / 100 GB NVMe | 12 | `favorites`, 4 shard × 3 nodes | 83 788 |
+| `opensearch` | VM | 16 vCPU / 64 GB RAM / 500 GB NVMe | 8 | `card_search`, 8 primary shard + replica shards | 232 696 |
+| `clickhouse` | VM | 16 vCPU / 64 GB RAM / 2 TB NVMe | 4 | `event_log`, 2 shard × 2 replica | 185 815 |
+| `kafka` | VM | 16 vCPU / 64 GB RAM / 500 GB NVMe | 5 | `cards-upsert`, `cards-delete`, `user-actions`, `moderation-events`, `media-events` | 145 435 |
+| `redis` | VM | 16 vCPU / 128 GB RAM / 500 GB NVMe | 3 | cache, user embeddings, Sentinel | 122 849 |
+| `coordination` | VM | 4 vCPU / 16 GB RAM / 50 GB NVMe | 3 | etcd, Patroni, ClickHouse Keeper | 19 210 |
+| `media-storage` | Object Storage | S3-compatible storage | — | originals, thumbnails, backup artifacts | 6 880 158 |
+| `l4-public` | Managed Load Balancer | 3 VIP + traffic | 3 | `www.resale.ru`, `api.resale.ru`, `seller.resale.ru` | 242 105 |
+| **Итого** | — | — | **77 VM/node + managed storage/LB** | — | **9 155 351** |
+
+### 11.2 Требования к ресурсам
+
+| Контур | Нагрузка | CPU | RAM | Диск | Сеть |
+|---|---:|---:|---:|---:|---:|
+| L7 NGINX | `10 691,91 RPS_peak`, HTTPS termination | 52 | 44 GB | — | 41,13 Гбит/с |
+| Backend API | buyer/seller/auth/moderation/media path | 40 | 52 GB | — | через L7 |
+| Search / Recommendation | `4 861,11 RPS_peak` search + recommendation retrieval | 12 | 18 GB | — | внутренний трафик |
+| Async workers | `10 126,50 events/s peak`, `486,11 photo/s peak` | 43,5 | 51 GB | — | Kafka / Object Storage |
+| PostgreSQL | OLTP read/write, shards, replicas | 480 | 1 920 GB | 8,7 TB | внутренний трафик |
+| OpenSearch | `card_search`, search-heavy workload | 128 | 512 GB | 4 TB | внутренний трафик |
+| ClickHouse | `3 563,97 write RPS_avg` в `event_log` | 64 | 256 GB | 8 TB | внутренний трафик |
+| Kafka | буферные топики, RF=3 | 80 | 320 GB | 2,5 TB | внутренний трафик |
+| Redis | hot-path cache + embeddings | 48 | 384 GB | 1,5 TB | внутренний трафик |
+| Object Storage | `6 063,95 ТБ` media | managed | managed | 6 063,95 TB | через CDN |
+| L4 Load Balancer | 3 публичных VIP | managed | managed | — | 41,13 Гбит/с |
+
+### 11.3 Kubernetes containers
+
+| Группа | Контейнеры | Pods | CPU req/lim | RAM req/lim |
+|---|---|---:|---:|---:|
+| `l7-nginx` | `nginx-www`, `nginx-api`, `nginx-seller` | 11 | 52 / 52 | 44 / 88 GB |
+| `public-api` | `buyer-api`, `seller-api`, `auth-service`, `moderation-service`, `media-service`, `web-origin` | 19 | 24 / 48 | 30 / 60 GB |
+| `search-rec` | `search-service`, `recommendation-service` | 6 | 12 / 24 | 18 / 36 GB |
+| `async-workers` | `search-index-updater`, `event-feature-updater`, `event-log-ingestor`, `media-worker`, `backup-controller` | 21 | 43,5 / 71 | 51 / 102 GB |
+| `pgbouncer` | PostgreSQL RW/RO pools | 8 | 4 / 8 | 4 / 8 GB |
+| **Итого** | — | **65** | **135,5 / 203** | **147 / 294 GB** |
+
+
+### 11.4 Расчёт стоимости
+
+| Контур | Формула | ₽/мес |
+|---|---:|---:|
+| `k8s-app` | `15 * 48,1656 * 730` | 527 413 |
+| `pg-core` | `3 * (31,9152 * 730 + 100 * 0,01586 * 730)` | 73 368 |
+| `pg-cards-media` | `24 * (31,9152 * 730 + 300 * 0,01586 * 730)` | 642 514 |
+| `pg-favorites` | `12 * (7,9788 * 730 + 100 * 0,01586 * 730)` | 83 788 |
+| `opensearch` | `8 * (31,9152 * 730 + 500 * 0,01586 * 730)` | 232 696 |
+| `clickhouse` | `4 * (31,9152 * 730 + 2000 * 0,01586 * 730)` | 185 815 |
+| `kafka` | `5 * (31,9152 * 730 + 500 * 0,01586 * 730)` | 145 435 |
+| `redis` | `3 * (48,1656 * 730 + 500 * 0,01586 * 730)` | 122 849 |
+| `coordination` | `3 * (7,9788 * 730 + 50 * 0,01586 * 730)` | 19 210 |
+| `media-storage` | `6 063 950 * 1,1346` | 6 880 158 |
+| `l4-public` | `134,68 * 30 * 1000 * 0,05937334 + 3 * 0,80316666 * 730 + 3 * 0,2074 * 730` | 242 105 |
+| **Итого** | — | **9 155 351** |
+
 
 ## Источники
 1. https://ads.avito.com/platform
@@ -1051,3 +1115,9 @@ Read-write split выполняется по отдельным PgBouncer-кон
 47. https://clickhouse.com/docs/architecture/replication
 48. https://kafka.apache.org/41/operations/basic-kafka-operations/
 49. https://docs.ceph.com/en/latest/radosgw/s3/bucketops/
+50. https://cloud.ru/documents/tariffs/evolution/evolution-compute
+51. https://cloud.ru/documents/tariffs/evolution/managed-kubernetes
+52. https://cloud.ru/documents/tariffs/evolution/object-storage
+53. https://cloud.ru/documents/tariffs/evolution/load-balancer
+54. https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+55. https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
