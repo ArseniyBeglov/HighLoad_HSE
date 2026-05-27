@@ -1002,13 +1002,10 @@ Read-write split выполняется по отдельным PgBouncer-кон
 
 ## 11. Список серверов
 
-## 11. Список серверов
-
 ### 11.1 Требования к ресурсам по контурам
 
 | Контур                           | Технологии / сервисы                     |                                                                                                                                                            Нагрузка / объём | Размещение                 | Что входит                                                                                                 |
 |----------------------------------|------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|----------------------------|------------------------------------------------------------------------------------------------------------|
-| L4 public                        | Cloud.ru Evolution Load Balancer         |                                                                                                                                                         `41,13 Гбит/с peak` | managed                    | `www.resale.ru`, `api.resale.ru`, `seller.resale.ru`                                                       |
 | CDN                              | CDN provider                             |                                                                                                                                                 `img/static`, media traffic | external                   | `img.resale.ru`, `static.resale.ru`                                                                        |
 | L7 ingress                       | NGINX ingress / reverse-proxy            |                                                                                                                `10 691,91 RPS_peak`, `41,13 Гбит/с peak`, HTTPS termination | Kubernetes                 | `nginx-www`, `nginx-api`, `nginx-seller`                                                                   |
 | Public API                       | Go services                              |                                                                          `buyer-api: 10 136,36 RPS_peak`; `seller-api: 555,55 RPS_peak`; `auth-service: 10 691,91 RPS_peak` | Kubernetes                 | `buyer-api`, `seller-api`, `auth-service`                                                                  |
